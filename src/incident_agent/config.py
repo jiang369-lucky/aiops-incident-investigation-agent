@@ -16,9 +16,10 @@ def _path_from_env(name: str, default: str) -> Path:
 
 @dataclass(frozen=True, slots=True)
 class Settings:
-    database_path: Path = field(
-        default_factory=lambda: _path_from_env(
-            "AGENT_DATABASE_PATH", "data/processed/openstack_logs.db"
+    database_url: str = field(
+        default_factory=lambda: os.getenv(
+            "AGENT_DATABASE_URL",
+            "postgresql://incident:incident_dev_password@127.0.0.1:55432/incident_agent",
         )
     )
     raw_data_path: Path = field(

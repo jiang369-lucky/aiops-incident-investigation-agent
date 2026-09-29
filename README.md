@@ -33,7 +33,7 @@ Harness（步数、超时、重试、循环熔断、白名单、Trace）
     ▼
 Tool Registry ──同一接口──> 本地调用 / FastAPI / MCP
     │
-    ├── SQLite 日志索引（只读查询）
+    ├── PostgreSQL 日志索引（只读查询）
     ├── Runbook 检索
     ├── 引用校验
     └── 工单草稿（必须人工批准）
@@ -50,6 +50,7 @@ Tool Registry ──同一接口──> 本地调用 / FastAPI / MCP
 
 ```powershell
 cd D:\yolo\rag\aiops-incident-investigation-agent
+docker compose up -d postgres
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -e ".[all]"
@@ -57,7 +58,7 @@ python -m pip install -e ".[all]"
 # 若 data/raw 已有四个文件，可跳过下载
 .\scripts\download_data.ps1
 
-# 把约 20.8 万行日志建立为本地 SQLite 索引
+# 把约 20.8 万行日志导入 PostgreSQL 并建立索引
 incident-agent prepare
 
 # 不使用任何模型 API 的完整演示
@@ -68,6 +69,20 @@ incident-agent evaluate
 
 # 测试
 pytest -q
+```
+
+默认开发连接为 `postgresql://incident:incident_dev_password@127.0.0.1:55432/incident_agent`，
+仅供本机演示。实际部署请修改数据库密码，并通过 `AGENT_DATABASE_URL` 环境变量注入连接串；
+不要将真实密码提交到仓库。`prepare` 重复运行会复用已有完整索引；仅在需要重建时使用
+`incident-agent prepare --force`。原来的 `data/processed/*.db` 文件不会被读取，数据会从
+`data/raw/` 重新导入 PostgreSQL。
+
+如果只使用 Docker，也可以在下载数据后运行：
+
+```powershell
+docker compose up -d postgres
+docker compose run --rm incident-api incident-agent prepare
+docker compose up -d incident-api
 ```
 
 本次创建项目时已经下载并校验数据；归档 MD5 为
@@ -183,14 +198,14 @@ src/incident_agent/
   harness.py       # Agent 运行、护栏、重试和 Trace
   policies.py      # 离线策略与 OpenAI-compatible LLM 策略
   tools.py         # 所有调用方式共用的工具注册模块
-  logstore.py      # 日志解析、SQLite 索引和受限查询
+  logstore.py      # 日志解析、PostgreSQL 索引和受限查询
   mcp_server.py    # MCP adapter
   api.py           # FastAPI adapter
   evaluation.py    # 标签隔离的评测器
 skills/            # 三个可加载 Skill
 knowledge/         # Runbook 知识
 tests/             # Parser、工具、Harness、Skill 测试
-data/              # 原始数据、数据说明和本地索引
+data/              # 原始数据和数据说明（数据库由 Docker Volume 保存）
 artifacts/         # Trace、工单草稿、评测结果
 ```
 

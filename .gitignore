@@ -6,6 +6,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 data/raw/*
+# Legacy local SQLite indexes are never committed during migration.
 data/processed/*.db
 artifacts/traces/*.jsonl
 artifacts/tickets/*.json

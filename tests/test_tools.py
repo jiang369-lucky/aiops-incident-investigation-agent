@@ -1,3 +1,6 @@
+from pathlib import Path
+
+from incident_agent.logstore import OpenStackLogStore
 from incident_agent.tools import ToolRegistry
 
 INSTANCE = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -25,3 +28,11 @@ def test_evidence_validation_rejects_wrong_instance(registry: ToolRegistry) -> N
     )
     assert valid["all_valid"] is True
     assert invalid["all_valid"] is False
+
+
+def test_postgres_import_is_idempotent(indexed_store: OpenStackLogStore, tmp_path: Path) -> None:
+    expected = {"abnormal": 2, "normal1": 1, "normal2": 1}
+    assert indexed_store.build(tmp_path / "raw") == expected
+    assert indexed_store.build(tmp_path / "raw", force=True) == expected
+    assert indexed_store.is_ready() is True
+    assert len(indexed_store.search(dataset="abnormal", instance_id=INSTANCE)) == 2

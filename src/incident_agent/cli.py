@@ -16,7 +16,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
-    prepare = commands.add_parser("prepare", help="Build the local SQLite log index")
+    prepare = commands.add_parser("prepare", help="Build the PostgreSQL log index")
     prepare.add_argument("--force", action="store_true", help="Rebuild an existing index")
 
     investigate = commands.add_parser("investigate", help="Investigate one VM instance")
@@ -46,11 +46,7 @@ async def _run(args: argparse.Namespace) -> int:
     application = create_application()
     if args.command == "prepare":
         counts = application.store.build(application.settings.raw_data_path, force=bool(args.force))
-        print(
-            json.dumps(
-                {"database": str(application.settings.database_path), "counts": counts}, indent=2
-            )
-        )
+        print(json.dumps({"database": "PostgreSQL", "counts": counts}, indent=2))
         return 0
 
     if args.command == "investigate":

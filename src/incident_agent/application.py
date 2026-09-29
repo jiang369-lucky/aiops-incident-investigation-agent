@@ -44,7 +44,7 @@ class Application:
 
 def create_application(settings: Settings | None = None) -> Application:
     settings = settings or Settings()
-    store = OpenStackLogStore(settings.database_path)
+    store = OpenStackLogStore(settings.database_url)
     tools = ToolRegistry(
         store=store,
         runbooks=RunbookStore(settings.runbooks_path),

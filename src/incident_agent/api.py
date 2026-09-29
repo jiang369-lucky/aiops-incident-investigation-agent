@@ -26,8 +26,8 @@ app = FastAPI(
 @app.get("/health")
 def health() -> dict[str, object]:
     return {
-        "status": "ok" if application.settings.database_path.exists() else "index_missing",
-        "database": str(application.settings.database_path),
+        "status": "ok" if application.store.is_ready() else "index_missing_or_unavailable",
+        "database": "PostgreSQL",
     }
 
 
