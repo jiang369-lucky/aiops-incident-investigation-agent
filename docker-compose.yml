@@ -1,0 +1,12 @@
+services:
+  incident-api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      AGENT_DATABASE_PATH: /app/data/processed/openstack_logs.db
+      AGENT_SKILLS_PATH: /app/skills
+      AGENT_RUNBOOKS_PATH: /app/knowledge/runbooks
+    volumes:
+      - ./data:/app/data:ro
+      - ./artifacts:/app/artifacts
