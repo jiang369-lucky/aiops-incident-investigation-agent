@@ -12,7 +12,7 @@ from typing import Any
 import psycopg
 from psycopg.rows import dict_row
 
-from .domain import LogRecord
+from .domain import REQUEST_PATTERN, LogRecord
 from .parser import parse_openstack_line
 
 DATASET_FILES = {
@@ -110,6 +110,10 @@ class OpenStackLogStore:
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_logs_request ON logs(request_id, dataset, timestamp)"
         )
+        connection.execute(
+            """CREATE INDEX IF NOT EXISTS idx_logs_instance_request_time
+            ON logs(instance_id, request_id, timestamp, dataset, line_no)"""
+        )
         connection.execute("CREATE INDEX IF NOT EXISTS idx_logs_level ON logs(level, dataset)")
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs(dataset, timestamp)"
@@ -183,15 +187,39 @@ class OpenStackLogStore:
         with self._connect() as connection:
             return [self._row_to_record(row) for row in connection.execute(sql, parameters)]
 
-    def timeline(self, *, dataset: str, instance_id: str, limit: int = 80) -> list[LogRecord]:
-        return self.search(dataset=dataset, instance_id=instance_id, limit=limit)
+    def timeline(
+        self, *, dataset: str, instance_id: str, request_id: str, limit: int = 80
+    ) -> list[LogRecord]:
+        """Keep bounded opening and terminal events of the same operation."""
+        limit = max(1, min(int(limit), 100))
+        where = "instance_id = %s AND request_id = %s"
+        parameters: list[object] = [instance_id.lower(), request_id.lower()]
+        if dataset != "all":
+            where += " AND dataset = %s"
+            parameters.append(dataset)
+        parameters.extend(((limit + 1) // 2, limit // 2))
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""WITH scoped AS (
+                    SELECT *, ROW_NUMBER() OVER (ORDER BY timestamp, dataset, line_no) AS event_rank,
+                           COUNT(*) OVER () AS scope_count
+                    FROM logs WHERE {where}
+                )
+                SELECT * FROM scoped
+                WHERE event_rank <= %s OR event_rank > scope_count - %s
+                ORDER BY event_rank""",
+                parameters,
+            ).fetchall()
+        return [self._row_to_record(row) for row in rows]
 
-    def instance_summary(self, *, dataset: str, instance_id: str) -> dict[str, object]:
-        where = "instance_id = %s"
-        parameters: tuple[str, ...] = (instance_id.lower(),)
+    def instance_summary(
+        self, *, dataset: str, instance_id: str, request_id: str
+    ) -> dict[str, object]:
+        where = "instance_id = %s AND request_id = %s"
+        parameters: tuple[str, ...] = (instance_id.lower(), request_id.lower())
         if dataset != "all":
             where = "dataset = %s AND " + where
-            parameters = (dataset, instance_id.lower())
+            parameters = (dataset, instance_id.lower(), request_id.lower())
         with self._connect() as connection:
             rows = connection.execute(
                 f"""
@@ -212,11 +240,15 @@ class OpenStackLogStore:
         for record in records:
             match = BUILD_DURATION_RE.search(record.message)
             if match:
-                build_duration = float(match.group(1))
-                build_record = record
-                break
+                duration = float(match.group(1))
+                if build_duration is None or duration > build_duration:
+                    build_duration = duration
+                    build_record = record
         outlier_threshold = float(baseline["p95_seconds"]) * 1.25
-        latency_outlier = bool(build_duration and build_duration > outlier_threshold)
+        latency_outlier = bool(
+            build_duration is not None and baseline["sample_count"]
+            and build_duration > outlier_threshold
+        )
         suspicious = [record for record in records if SUSPICIOUS_RE.search(record.raw)]
         if latency_outlier and build_record and build_record not in suspicious:
             suspicious.append(build_record)
@@ -224,6 +256,7 @@ class OpenStackLogStore:
             "dataset": dataset,
             "matched_datasets": matched_datasets,
             "instance_id": instance_id.lower(),
+            "request_id": request_id.lower(),
             "total_records": len(records),
             "level_counts": dict(levels),
             "source_counts": dict(sources.most_common(8)),
@@ -291,6 +324,26 @@ class OpenStackLogStore:
                 (dataset, limit),
             ).fetchall()
         return [row["instance_id"] for row in rows]
+
+    def request_ids(self, *, instance_id: str, require_timestamp: bool = False) -> list[str]:
+        """Enumerate operations for evaluation without reading anomaly labels."""
+        with self._connect() as connection:
+            timestamp_clause = " AND timestamp IS NOT NULL" if require_timestamp else ""
+            rows = connection.execute(
+                f"""SELECT request_id, MAX(timestamp) AS last_timestamp FROM logs
+                WHERE instance_id = %s AND request_id IS NOT NULL{timestamp_clause}
+                GROUP BY request_id ORDER BY last_timestamp DESC NULLS LAST, request_id""",
+                (instance_id.lower(),),
+            ).fetchall()
+        return [
+            row["request_id"] for row in rows
+            if re.fullmatch(REQUEST_PATTERN, row["request_id"], re.IGNORECASE)
+        ]
+
+    def latest_request_id(self, *, instance_id: str) -> str | None:
+        """Latest means last observed log time, not today's clock or UUID order."""
+        candidates = self.request_ids(instance_id=instance_id, require_timestamp=True)
+        return candidates[0] if candidates else None
 
     @staticmethod
     def _row_to_record(row: dict[str, Any]) -> LogRecord:

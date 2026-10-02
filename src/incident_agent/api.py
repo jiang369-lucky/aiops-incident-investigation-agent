@@ -7,10 +7,12 @@ except ImportError as exc:  # pragma: no cover
     raise RuntimeError("Install API dependencies with `pip install -e .[api]`") from exc
 
 from .application import create_application
+from .domain import REQUEST_PATTERN, UUID_PATTERN, ScopeResolutionError
 
 
 class InvestigationRequest(BaseModel):
-    instance_id: str = Field(pattern=r"^[0-9a-fA-F-]{36}$")
+    instance_id: str = Field(pattern=rf"^{UUID_PATTERN}$")
+    request_id: str | None = Field(default=None, pattern=rf"^{REQUEST_PATTERN}$")
     mode: str = Field(default="heuristic", pattern=r"^(heuristic|llm)$")
 
 
@@ -32,13 +34,12 @@ def health() -> dict[str, object]:
 
 @app.post("/v1/investigations")
 async def investigate(request: InvestigationRequest) -> dict[str, object]:
-    task = (
-        f"Investigate OpenStack instance {request.instance_id}. "
-        "Produce an evidence-grounded report and do not take remediation action."
-    )
-    result = await application.harness(request.mode).run(task)
+    try:
+        result = await application.investigate(request.instance_id, request.request_id, request.mode)
+    except ScopeResolutionError as exc:
+        raise HTTPException(status_code=422, detail={"code": "scope_unresolved", "error": str(exc)}) from exc
     if result.status == "failed":
-        raise HTTPException(status_code=500, detail=result.error)
+        raise HTTPException(status_code=500, detail=result.to_dict())
     if result.status in {"blocked", "timed_out"}:
         raise HTTPException(status_code=422, detail=result.to_dict())
     return result.to_dict()

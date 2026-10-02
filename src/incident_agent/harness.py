@@ -10,7 +10,14 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from .domain import AgentAction, FinishAction, Observation, RunResult, ToolAction
+from .domain import (
+    AgentAction,
+    FinishAction,
+    InvestigationScope,
+    Observation,
+    RunResult,
+    ToolAction,
+)
 from .mcp_client import MCPToolClient
 from .tools import ToolRegistry
 
@@ -69,6 +76,8 @@ class AgentHarness:
         self._trace(run_id, "run_started", {"task": task, "config": asdict(self.config)})
 
         try:
+            scope = InvestigationScope.from_task(task)
+            self._trace(run_id, "scope_locked", asdict(scope))
             async with asyncio.timeout(self.config.total_timeout_seconds):
                 async with AsyncExitStack() as stack:
                     if isinstance(self.tools, MCPToolClient):
@@ -89,6 +98,10 @@ class AgentHarness:
                         action = await self.policy.next_action(task, observations, step)
                         self._trace(run_id, "action", self._action_dict(action, step))
                         if isinstance(action, FinishAction):
+                            if (action.report.instance_id, action.report.request_id) != (
+                                scope.instance_id, scope.request_id
+                            ):
+                                raise ValueError("Report changed the locked instance/request scope")
                             elapsed = (time.perf_counter() - started) * 1_000
                             result = RunResult(
                                 run_id=run_id,
@@ -100,7 +113,7 @@ class AgentHarness:
                             self._trace(run_id, "run_finished", result.to_dict())
                             return result
 
-                        blocked = self._guard(action, repeats)
+                        blocked = self._guard(action, repeats, scope)
                         if blocked:
                             elapsed = (time.perf_counter() - started) * 1_000
                             result = RunResult(
@@ -156,9 +169,19 @@ class AgentHarness:
         self._trace(run_id, "run_failed", result.to_dict())
         return result
 
-    def _guard(self, action: ToolAction, repeats: dict[str, int]) -> str | None:
+    def _guard(
+        self, action: ToolAction, repeats: dict[str, int], scope: InvestigationScope
+    ) -> str | None:
         if action.tool not in self.config.allowed_tools:
             return f"Tool is not allowed by harness policy: {action.tool}"
+        if action.tool in {
+            "get_case_memory", "get_instance_summary", "search_logs",
+            "get_timeline", "validate_evidence",
+        }:
+            for field, expected in asdict(scope).items():
+                actual = action.arguments.get(field)
+                if not isinstance(actual, str) or actual.lower() != expected:
+                    return f"Tool must preserve the locked instance/request scope: {field}"
         signature = hashlib.sha256(
             json.dumps(
                 {"tool": action.tool, "arguments": action.arguments},

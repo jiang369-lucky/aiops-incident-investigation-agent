@@ -25,10 +25,21 @@ def indexed_store(tmp_path: Path) -> Iterator[OpenStackLogStore]:
         connection.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
     raw = tmp_path / "raw"
     raw.mkdir()
-    abnormal = "nova-compute.log 2017-05-14 21:08:12.571 2931 ERROR nova.compute.manager [req-11111111-1111-1111-1111-111111111111 - - - - -] [instance: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa] VM Stopped unexpectedly\nnova-compute.log 2017-05-14 21:08:19.735 2931 INFO nova.virt.driver [-] [instance: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa] Instance spawned successfully."
+    abnormal = (
+        "nova-compute.log 2017-05-14 21:08:12.571 2931 ERROR nova.compute.manager "
+        "[req-11111111-1111-1111-1111-111111111111 - - - - -] "
+        "[instance: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa] VM Stopped unexpectedly\n"
+        "nova-compute.log 2017-05-14 21:08:19.735 2931 INFO nova.virt.driver "
+        "[req-11111111-1111-1111-1111-111111111111 - - - - -] "
+        "[instance: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa] Instance spawned successfully.\n"
+        "nova-compute.log 2017-05-14 22:08:12.571 2931 ERROR nova.compute.manager "
+        "[req-22222222-2222-2222-2222-222222222222 - - - - -] "
+        "[instance: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa] Failure in another request\n"
+    )
     normal = (
         "nova-compute.log 2017-05-14 21:08:19.735 2931 INFO nova.virt.driver "
-        "[-] [instance: bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb] Instance spawned successfully.\n"
+        "[req-33333333-3333-3333-3333-333333333333 - - - - -] "
+        "[instance: bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb] Instance spawned successfully.\n"
     )
     (raw / "openstack_abnormal.log").write_text(abnormal, encoding="utf-8")
     (raw / "openstack_normal1.log").write_text(normal, encoding="utf-8")

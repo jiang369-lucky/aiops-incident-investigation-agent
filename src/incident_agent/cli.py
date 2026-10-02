@@ -6,6 +6,7 @@ import json
 from collections.abc import Sequence
 
 from .application import create_application
+from .domain import ScopeResolutionError, normalize_instance_id, normalize_request_id
 from .evaluation import evaluate
 
 
@@ -20,7 +21,11 @@ def _parser() -> argparse.ArgumentParser:
     prepare.add_argument("--force", action="store_true", help="Rebuild an existing index")
 
     investigate = commands.add_parser("investigate", help="Investigate one VM instance")
-    investigate.add_argument("instance_id")
+    investigate.add_argument("instance_id", type=normalize_instance_id)
+    investigate.add_argument(
+        "request_id", nargs="?", type=normalize_request_id,
+        help="Optional req-<UUID>; omitted selects the latest request in indexed logs",
+    )
     investigate.add_argument("--mode", choices=["heuristic", "llm"], default=None)
     investigate.add_argument(
         "--approve-ticket",
@@ -47,11 +52,11 @@ async def _run(args: argparse.Namespace) -> int:
         return 0
 
     if args.command == "investigate":
-        task = (
-            f"Investigate OpenStack instance {args.instance_id}. "
-            "Produce an evidence-grounded report and do not take remediation action."
-        )
-        result = await application.harness(args.mode).run(task)
+        try:
+            result = await application.investigate(args.instance_id, args.request_id, args.mode)
+        except ScopeResolutionError as exc:
+            print(json.dumps({"status": "blocked", "error": str(exc)}, ensure_ascii=False))
+            return 1
         print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
         if args.approve_ticket and result.report:
             saved = application.tools.save_ticket_draft(

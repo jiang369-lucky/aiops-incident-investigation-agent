@@ -4,6 +4,7 @@ from typing import Self
 from incident_agent.logstore import OpenStackLogStore
 
 INSTANCE = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+REQUEST = "req-11111111-1111-1111-1111-111111111111"
 
 
 class FakeConnection:
@@ -28,7 +29,7 @@ class FakeConnection:
                 "source": "nova-compute.log",
                 "level": "INFO",
                 "logger": "nova.compute.manager",
-                "request_id": None,
+                "request_id": REQUEST,
                 "instance_id": INSTANCE,
                 "message": "Instance spawned successfully",
                 "raw": "Instance spawned successfully",
@@ -50,12 +51,13 @@ def test_store_global_search_and_summary_do_not_filter_dataset(monkeypatch) -> N
     monkeypatch.setattr(store, "_connect", lambda: connection)
     store._duration_baseline = {"sample_count": 0, "p95_seconds": 0.0}
 
-    records = store.search(dataset="all", instance_id=INSTANCE)
-    summary = store.instance_summary(dataset="all", instance_id=INSTANCE)
+    records = store.search(dataset="all", instance_id=INSTANCE, request_id=REQUEST)
+    summary = store.instance_summary(dataset="all", instance_id=INSTANCE, request_id=REQUEST)
 
     assert {record.citation() for record in records} == {"normal1:1", "normal2:1"}
     assert summary["total_records"] == 2
     assert summary["matched_datasets"] == ["normal1", "normal2"]
     assert all("dataset = %s" not in query for query, _ in connection.queries)
-    assert connection.queries[0][1] == [INSTANCE, 30]
-    assert connection.queries[1][1] == (INSTANCE,)
+    assert all("request_id = %s" in query for query, _ in connection.queries)
+    assert connection.queries[0][1] == [INSTANCE, REQUEST, 30]
+    assert connection.queries[1][1] == (INSTANCE, REQUEST)

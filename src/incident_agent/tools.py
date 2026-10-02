@@ -5,12 +5,13 @@ from collections.abc import Callable
 from dataclasses import asdict
 from typing import Any
 
+from .domain import REQUEST_PATTERN, UUID_PATTERN, InvestigationScope
 from .logstore import DATASET_FILES, OpenStackLogStore
 from .memory import ApprovedCaseMemory
 from .runbooks import RunbookStore
 
 ToolFunction = Callable[..., dict[str, Any]]
-SAFE_ID_RE = re.compile(r"^[0-9a-f-]{36}$", re.IGNORECASE)
+SAFE_ID_RE = re.compile(rf"^{UUID_PATTERN}$", re.IGNORECASE)
 
 
 class ToolError(RuntimeError):
@@ -18,7 +19,7 @@ class ToolError(RuntimeError):
 
 
 class ToolRegistry:
-    """Shared tool implementation behind the MCP server and optional local transport."""
+    """Shared tools for the default local transport and optional MCP server."""
 
     def __init__(
         self,
@@ -58,15 +59,15 @@ class ToolRegistry:
         definitions = [
             {
                 "name": "get_instance_summary",
-                "description": "Count signals for one VM instance across all log partitions.",
-                "arguments": {"instance_id": "uuid"},
+                "description": "Count signals only for the specified instance and operation request.",
+                "arguments": {"instance_id": "uuid", "request_id": "req-uuid"},
             },
             {
                 "name": "search_logs",
                 "description": "Read a bounded set of matching log records.",
                 "arguments": {
-                    "instance_id": "optional uuid",
-                    "request_id": "optional req-uuid",
+                    "instance_id": "uuid",
+                    "request_id": "req-uuid",
                     "query": "optional text",
                     "levels": "optional list",
                     "limit": "1..100",
@@ -74,8 +75,8 @@ class ToolRegistry:
             },
             {
                 "name": "get_timeline",
-                "description": "Return chronological events for one VM instance.",
-                "arguments": {"instance_id": "uuid", "limit": "1..100"},
+                "description": "Return bounded opening and terminal events of this instance/request.",
+                "arguments": {"instance_id": "uuid", "request_id": "req-uuid", "limit": "1..100"},
             },
             {
                 "name": "search_runbooks",
@@ -84,14 +85,15 @@ class ToolRegistry:
             },
             {
                 "name": "get_case_memory",
-                "description": "Read recent human-approved drafts for this instance as background, never evidence.",
-                "arguments": {"instance_id": "uuid", "limit": "1..3"},
+                "description": "Read approved drafts for the same instance/request as background only.",
+                "arguments": {"instance_id": "uuid", "request_id": "req-uuid", "limit": "1..3"},
             },
             {
                 "name": "validate_evidence",
-                "description": "Verify that citations exist and refer to the investigated instance.",
+                "description": "Verify citations belong to both the investigated instance and request.",
                 "arguments": {
                     "instance_id": "uuid",
+                    "request_id": "req-uuid",
                     "citations": "list like abnormal:11960",
                 },
             },
@@ -104,8 +106,11 @@ class ToolRegistry:
         schemas: dict[str, dict[str, Any]] = {
             "get_instance_summary": {
                 "type": "object",
-                "properties": {"instance_id": {"type": "string"}},
-                "required": ["instance_id"],
+                "properties": {
+                    "instance_id": {"type": "string", "pattern": rf"^{UUID_PATTERN}$"},
+                    "request_id": {"type": "string", "pattern": rf"^{REQUEST_PATTERN}$"},
+                },
+                "required": ["instance_id", "request_id"],
             },
             "search_logs": {
                 "type": "object",
@@ -116,14 +121,16 @@ class ToolRegistry:
                     "levels": {"type": "array", "items": {"type": "string"}},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 100},
                 },
+                "required": ["instance_id", "request_id"],
             },
             "get_timeline": {
                 "type": "object",
                 "properties": {
                     "instance_id": {"type": "string"},
+                    "request_id": {"type": "string"},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 100},
                 },
-                "required": ["instance_id"],
+                "required": ["instance_id", "request_id"],
             },
             "search_runbooks": {
                 "type": "object",
@@ -137,17 +144,19 @@ class ToolRegistry:
                 "type": "object",
                 "properties": {
                     "instance_id": {"type": "string"},
+                    "request_id": {"type": "string"},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 3},
                 },
-                "required": ["instance_id"],
+                "required": ["instance_id", "request_id"],
             },
             "validate_evidence": {
                 "type": "object",
                 "properties": {
                     "instance_id": {"type": "string"},
+                    "request_id": {"type": "string"},
                     "citations": {"type": "array", "items": {"type": "string"}},
                 },
-                "required": ["instance_id", "citations"],
+                "required": ["instance_id", "request_id", "citations"],
             },
             "save_ticket_draft": {
                 "type": "object",
@@ -173,43 +182,61 @@ class ToolRegistry:
             raise ToolError("instance_id must be a UUID")
         return value
 
-    def get_instance_summary(self, dataset: str, instance_id: str) -> dict[str, Any]:
+    @staticmethod
+    def _scope(instance_id: str, request_id: str) -> InvestigationScope:
+        try:
+            return InvestigationScope(instance_id, request_id)
+        except (ValueError, TypeError) as exc:
+            raise ToolError(str(exc)) from exc
+
+    def get_instance_summary(self, dataset: str, instance_id: str, request_id: str) -> dict[str, Any]:
+        scope = self._scope(instance_id, request_id)
         return self.store.instance_summary(
-            dataset=self._dataset(dataset), instance_id=self._instance(instance_id)
+            dataset=self._dataset(dataset), instance_id=scope.instance_id, request_id=scope.request_id
         )
 
     def search_logs(
         self,
         dataset: str,
-        instance_id: str | None = None,
-        request_id: str | None = None,
+        instance_id: str,
+        request_id: str,
         query: str | None = None,
         levels: list[str] | None = None,
         limit: int = 30,
     ) -> dict[str, Any]:
-        if instance_id:
-            instance_id = self._instance(instance_id)
+        scope = self._scope(instance_id, request_id)
         records = self.store.search(
             dataset=self._dataset(dataset),
-            instance_id=instance_id,
-            request_id=request_id,
+            instance_id=scope.instance_id,
+            request_id=scope.request_id,
             query=query,
             levels=levels,
             limit=limit,
         )
         return {
+            "instance_id": scope.instance_id,
+            "request_id": scope.request_id,
             "count": len(records),
             "records": [self._record(record) for record in records],
             "truncated": len(records) == min(max(int(limit), 1), 100),
         }
 
-    def get_timeline(self, dataset: str, instance_id: str, limit: int = 80) -> dict[str, Any]:
+    def get_timeline(
+        self, dataset: str, instance_id: str, request_id: str, limit: int = 80
+    ) -> dict[str, Any]:
+        scope = self._scope(instance_id, request_id)
         records = self.store.timeline(
             dataset=self._dataset(dataset),
-            instance_id=self._instance(instance_id),
+            instance_id=scope.instance_id,
+            request_id=scope.request_id,
             limit=min(max(int(limit), 1), 100),
         )
-        return {"count": len(records), "events": [self._record(record) for record in records]}
+        return {
+            "instance_id": scope.instance_id, "request_id": scope.request_id,
+            "count": len(records), "selection": "head_and_tail",
+            "possibly_truncated": len(records) == min(max(int(limit), 1), 100),
+            "events": [self._record(record) for record in records],
+        }
 
     def search_runbooks(self, query: str, limit: int = 3) -> dict[str, Any]:
         if not query.strip():
@@ -217,20 +244,22 @@ class ToolRegistry:
         matches = self.runbooks.search(query, limit=min(max(int(limit), 1), 5))
         return {"count": len(matches), "matches": matches}
 
-    def get_case_memory(self, instance_id: str, limit: int = 2) -> dict[str, Any]:
-        instance_id = self._instance(instance_id)
-        cases = self.memory.recent(instance_id, limit)
+    def get_case_memory(self, instance_id: str, request_id: str, limit: int = 2) -> dict[str, Any]:
+        scope = self._scope(instance_id, request_id)
+        cases = self.memory.recent(scope.instance_id, scope.request_id, limit)
         return {
+            "instance_id": scope.instance_id,
+            "request_id": scope.request_id,
             "count": len(cases),
             "cases": cases,
             "warning": "Past approved drafts are background, not evidence about the current run.",
         }
 
     def validate_evidence(
-        self, dataset: str, instance_id: str, citations: list[str]
+        self, dataset: str, instance_id: str, request_id: str, citations: list[str]
     ) -> dict[str, Any]:
         dataset = self._dataset(dataset)
-        instance_id = self._instance(instance_id)
+        scope = self._scope(instance_id, request_id)
         if len(citations) > 30:
             raise ToolError("At most 30 citations can be validated per call")
         details: list[dict[str, Any]] = []
@@ -239,16 +268,19 @@ class ToolRegistry:
             valid = bool(
                 record
                 and (dataset == "all" or record.dataset == dataset)
-                and (record.instance_id == instance_id or instance_id in record.raw.lower())
+                and record.instance_id == scope.instance_id
+                and record.request_id == scope.request_id
             )
             details.append(
                 {
                     "citation": citation,
                     "valid": valid,
-                    "reason": "matched instance" if valid else "missing or wrong instance",
+                    "reason": "matched instance and request" if valid else "missing or wrong instance/request",
                 }
             )
         return {
+            "instance_id": scope.instance_id,
+            "request_id": scope.request_id,
             "all_valid": bool(details) and all(item["valid"] for item in details),
             "valid_count": sum(bool(item["valid"]) for item in details),
             "details": details,
@@ -261,8 +293,8 @@ class ToolRegistry:
                 "requires_approval": True,
                 "message": "Human approval is required before writing a ticket draft.",
             }
-        instance_id = self._instance(str(ticket.get("instance_id", "")))
-        saved = self.memory.save_approved(instance_id, ticket)
+        scope = self._scope(str(ticket.get("instance_id", "")), str(ticket.get("request_id", "")))
+        saved = self.memory.save_approved(scope.instance_id, scope.request_id, ticket)
         return {"saved": True, **saved, "requires_approval": False}
 
     @staticmethod

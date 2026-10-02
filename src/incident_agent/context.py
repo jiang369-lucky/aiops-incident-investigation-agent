@@ -4,7 +4,7 @@ import json
 import re
 from typing import Any
 
-from .domain import Observation
+from .domain import Observation, validated_log_citations
 
 SIGNAL_RE = re.compile(
     r"error|fail|exception|timeout|stopped|paused|spawned successfully|claim successful",
@@ -22,14 +22,11 @@ class ContextManager:
         latest = {item.tool: item.result for item in observations}
         summary = latest.get("get_instance_summary", {})
         timeline = latest.get("get_timeline", {})
-        validation = latest.get("validate_evidence", {})
         guidance = latest.get("search_runbooks", {})
         history = latest.get("get_case_memory", {})
         searches = [item for item in observations if item.tool == "search_logs"][-2:]
 
-        valid_citations = [
-            item["citation"] for item in validation.get("details", []) if item.get("valid")
-        ]
+        valid_citations = validated_log_citations(observations)
         events = timeline.get("events", [])
         priority = [
             event for event in events
@@ -49,6 +46,8 @@ class ContextManager:
                 {
                     "citation": citation,
                     "timestamp": event.get("timestamp"),
+                    "instance_id": event.get("instance_id"),
+                    "request_id": event.get("request_id"),
                     "level": event.get("level"),
                     "message": str(event.get("message", ""))[:300],
                 }
@@ -60,9 +59,10 @@ class ContextManager:
             "instance_summary": {
                 key: summary.get(key)
                 for key in (
-                    "instance_id", "matched_datasets", "total_records", "level_counts",
+                    "instance_id", "request_id", "matched_datasets", "total_records", "level_counts",
                     "suspicious_count", "build_duration_seconds", "latency_outlier",
                     "latency_outlier_threshold_seconds",
+                    "first_timestamp", "last_timestamp",
                 )
             },
             "suspicious_examples": [
@@ -73,6 +73,8 @@ class ContextManager:
                 for item in summary.get("suspicious_examples", [])[:6]
             ],
             "timeline_events": selected_events,
+            "timeline_selection": timeline.get("selection"),
+            "timeline_possibly_truncated": timeline.get("possibly_truncated", False),
             "searched_logs": [
                 {
                     "query": item.arguments,
@@ -80,6 +82,8 @@ class ContextManager:
                         {
                             "citation": record.get("citation"),
                             "timestamp": record.get("timestamp"),
+                            "instance_id": record.get("instance_id"),
+                            "request_id": record.get("request_id"),
                             "level": record.get("level"),
                             "message": str(record.get("message", ""))[:300],
                         }

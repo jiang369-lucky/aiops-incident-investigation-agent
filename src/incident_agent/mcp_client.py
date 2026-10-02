@@ -35,31 +35,33 @@ class MCPToolClient:
                 "AGENT_ARTIFACTS_PATH": str(self.settings.artifacts_path),
             },
         )
-        async with stdio_client(server) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                discovered = (await session.list_tools()).tools
-                available = {item.name for item in discovered}
-                required = {
-                    "get_case_memory", "get_instance_summary", "search_logs",
-                    "get_timeline", "search_runbooks", "validate_evidence",
+        async with (
+            stdio_client(server) as (read, write),
+            ClientSession(read, write) as session,
+        ):
+            await session.initialize()
+            discovered = (await session.list_tools()).tools
+            available = {item.name for item in discovered}
+            required = {
+                "get_case_memory", "get_instance_summary", "search_logs",
+                "get_timeline", "search_runbooks", "validate_evidence",
+            }
+            if missing := required - available:
+                raise RuntimeError(f"MCP server is missing tools: {sorted(missing)}")
+            self._catalog = [
+                {
+                    "name": item.name,
+                    "description": item.description or "",
+                    "input_schema": item.inputSchema,
                 }
-                if missing := required - available:
-                    raise RuntimeError(f"MCP server is missing tools: {sorted(missing)}")
-                self._catalog = [
-                    {
-                        "name": item.name,
-                        "description": item.description or "",
-                        "input_schema": item.inputSchema,
-                    }
-                    for item in discovered
-                ]
-                self._session = session
-                try:
-                    yield
-                finally:
-                    self._session = None
-                    self._catalog = []
+                for item in discovered
+            ]
+            self._session = session
+            try:
+                yield
+            finally:
+                self._session = None
+                self._catalog = []
 
     def describe(self) -> list[dict[str, Any]]:
         if self._session is None:
@@ -79,5 +81,5 @@ class MCPToolClient:
         if isinstance(value, dict) and set(value) == {"result"} and isinstance(value["result"], dict):
             value = value["result"]
         if not isinstance(value, dict):
-            raise RuntimeError(f"MCP tool {name} returned no structured object")
+            raise TypeError(f"MCP tool {name} returned no structured object")
         return value
