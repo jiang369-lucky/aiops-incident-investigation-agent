@@ -11,7 +11,6 @@ from .application import create_application
 
 class InvestigationRequest(BaseModel):
     instance_id: str = Field(pattern=r"^[0-9a-fA-F-]{36}$")
-    dataset: str = Field(pattern=r"^(abnormal|normal1|normal2)$")
     mode: str = Field(default="heuristic", pattern=r"^(heuristic|llm)$")
 
 
@@ -34,7 +33,7 @@ def health() -> dict[str, object]:
 @app.post("/v1/investigations")
 async def investigate(request: InvestigationRequest) -> dict[str, object]:
     task = (
-        f"Investigate OpenStack instance {request.instance_id}; dataset={request.dataset}. "
+        f"Investigate OpenStack instance {request.instance_id}. "
         "Produce an evidence-grounded report and do not take remediation action."
     )
     result = await application.harness(request.mode).run(task)

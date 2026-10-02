@@ -49,4 +49,4 @@ def registry(indexed_store: OpenStackLogStore, tmp_path: Path) -> ToolRegistry:
     (runbooks / "vm.md").write_text(
         "# VM stopped\nInvestigate VM stopped lifecycle", encoding="utf-8"
     )
-    return ToolRegistry(indexed_store, RunbookStore(runbooks), tmp_path / "tickets")
+    return ToolRegistry(indexed_store, RunbookStore(runbooks))

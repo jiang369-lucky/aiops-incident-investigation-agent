@@ -5,11 +5,13 @@ import hashlib
 import json
 import time
 import uuid
+from contextlib import AsyncExitStack
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
 from .domain import AgentAction, FinishAction, Observation, RunResult, ToolAction
+from .mcp_client import MCPToolClient
 from .tools import ToolRegistry
 
 
@@ -37,6 +39,7 @@ class HarnessConfig:
                 "search_logs",
                 "get_timeline",
                 "search_runbooks",
+                "get_case_memory",
                 "validate_evidence",
             }
         )
@@ -49,7 +52,7 @@ class AgentHarness:
     def __init__(
         self,
         policy: AgentPolicy,
-        tools: ToolRegistry,
+        tools: ToolRegistry | MCPToolClient,
         trace_path: Path,
         config: HarnessConfig | None = None,
     ):
@@ -67,38 +70,53 @@ class AgentHarness:
 
         try:
             async with asyncio.timeout(self.config.total_timeout_seconds):
-                for step in range(self.config.max_steps):
-                    action = await self.policy.next_action(task, observations, step)
-                    self._trace(run_id, "action", self._action_dict(action, step))
-                    if isinstance(action, FinishAction):
-                        elapsed = (time.perf_counter() - started) * 1_000
-                        result = RunResult(
-                            run_id=run_id,
-                            status="completed",
-                            report=action.report,
-                            observations=observations,
-                            elapsed_ms=elapsed,
-                        )
-                        self._trace(run_id, "run_finished", result.to_dict())
-                        return result
+                async with AsyncExitStack() as stack:
+                    if isinstance(self.tools, MCPToolClient):
+                        await stack.enter_async_context(self.tools.connect())
+                    catalog = [
+                        item for item in self.tools.describe()
+                        if item["name"] in self.config.allowed_tools
+                    ]
+                    if hasattr(self.policy, "set_tools"):
+                        self.policy.set_tools(catalog)
+                    self._trace(
+                        run_id,
+                        "tools_discovered",
+                        {"transport": "mcp" if isinstance(self.tools, MCPToolClient) else "local",
+                         "names": [item["name"] for item in catalog]},
+                    )
+                    for step in range(self.config.max_steps):
+                        action = await self.policy.next_action(task, observations, step)
+                        self._trace(run_id, "action", self._action_dict(action, step))
+                        if isinstance(action, FinishAction):
+                            elapsed = (time.perf_counter() - started) * 1_000
+                            result = RunResult(
+                                run_id=run_id,
+                                status="completed",
+                                report=action.report,
+                                observations=observations,
+                                elapsed_ms=elapsed,
+                            )
+                            self._trace(run_id, "run_finished", result.to_dict())
+                            return result
 
-                    blocked = self._guard(action, repeats)
-                    if blocked:
-                        elapsed = (time.perf_counter() - started) * 1_000
-                        result = RunResult(
-                            run_id=run_id,
-                            status="blocked",
-                            report=None,
-                            observations=observations,
-                            error=blocked,
-                            elapsed_ms=elapsed,
-                        )
-                        self._trace(run_id, "run_blocked", result.to_dict())
-                        return result
+                        blocked = self._guard(action, repeats)
+                        if blocked:
+                            elapsed = (time.perf_counter() - started) * 1_000
+                            result = RunResult(
+                                run_id=run_id,
+                                status="blocked",
+                                report=None,
+                                observations=observations,
+                                error=blocked,
+                                elapsed_ms=elapsed,
+                            )
+                            self._trace(run_id, "run_blocked", result.to_dict())
+                            return result
 
-                    observation = await self._execute(action)
-                    observations.append(observation)
-                    self._trace(run_id, "observation", asdict(observation))
+                        observation = await self._execute(action)
+                        observations.append(observation)
+                        self._trace(run_id, "observation", asdict(observation))
         except TimeoutError:
             elapsed = (time.perf_counter() - started) * 1_000
             result = RunResult(
@@ -159,7 +177,10 @@ class AgentHarness:
             started = time.perf_counter()
             try:
                 async with asyncio.timeout(self.config.tool_timeout_seconds):
-                    result = await asyncio.to_thread(self.tools.call, action.tool, action.arguments)
+                    if isinstance(self.tools, MCPToolClient):
+                        result = await self.tools.call_async(action.tool, action.arguments)
+                    else:
+                        result = await asyncio.to_thread(self.tools.call, action.tool, action.arguments)
                 result = self._bounded(result)
                 return Observation(
                     tool=action.tool,

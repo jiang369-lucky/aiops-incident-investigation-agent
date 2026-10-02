@@ -1,9 +1,12 @@
 from pathlib import Path
 
+import pytest
+
 from incident_agent.logstore import OpenStackLogStore
-from incident_agent.tools import ToolRegistry
+from incident_agent.tools import ToolError, ToolRegistry
 
 INSTANCE = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+MULTI_PARTITION_INSTANCE = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
 
 
 def test_tools_return_citations_but_not_evaluation_labels(registry: ToolRegistry) -> None:
@@ -28,6 +31,32 @@ def test_evidence_validation_rejects_wrong_instance(registry: ToolRegistry) -> N
     )
     assert valid["all_valid"] is True
     assert invalid["all_valid"] is False
+
+
+def test_global_lookup_combines_partitions_and_keeps_source_citations(
+    registry: ToolRegistry,
+) -> None:
+    summary = registry.call(
+        "get_instance_summary", {"instance_id": MULTI_PARTITION_INSTANCE}
+    )
+    timeline = registry.call("get_timeline", {"instance_id": MULTI_PARTITION_INSTANCE})
+    assert summary["total_records"] == 2
+    assert summary["matched_datasets"] == ["normal1", "normal2"]
+    assert {event["citation"] for event in timeline["events"]} == {"normal1:1", "normal2:1"}
+    assert registry.call(
+        "validate_evidence",
+        {
+            "instance_id": MULTI_PARTITION_INSTANCE,
+            "citations": ["normal1:1", "normal2:1"],
+        },
+    )["all_valid"] is True
+
+
+def test_agent_tool_rejects_partition_specific_lookup(registry: ToolRegistry) -> None:
+    with pytest.raises(ToolError, match="search all log partitions"):
+        registry.call(
+            "get_instance_summary", {"dataset": "abnormal", "instance_id": INSTANCE}
+        )
 
 
 def test_postgres_import_is_idempotent(indexed_store: OpenStackLogStore, tmp_path: Path) -> None:

@@ -33,6 +33,7 @@ class Settings:
         default_factory=lambda: _path_from_env("AGENT_ARTIFACTS_PATH", "artifacts")
     )
     model_mode: str = field(default_factory=lambda: os.getenv("AGENT_MODEL_MODE", "heuristic"))
+    tool_transport: str = field(default_factory=lambda: os.getenv("AGENT_TOOL_TRANSPORT", "mcp"))
     model_base_url: str = field(
         default_factory=lambda: os.getenv("AGENT_BASE_URL", "https://api.openai.com/v1").rstrip("/")
     )

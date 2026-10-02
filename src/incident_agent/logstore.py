@@ -158,8 +158,11 @@ class OpenStackLogStore:
         limit: int = 30,
     ) -> list[LogRecord]:
         limit = max(1, min(int(limit), 100))
-        clauses = ["dataset = %s"]
-        parameters: list[object] = [dataset]
+        clauses: list[str] = []
+        parameters: list[object] = []
+        if dataset != "all":
+            clauses.append("dataset = %s")
+            parameters.append(dataset)
         if instance_id:
             clauses.append("instance_id = %s")
             parameters.append(instance_id.lower())
@@ -175,11 +178,8 @@ class OpenStackLogStore:
             clauses.append("LOWER(raw) LIKE %s")
             parameters.append(f"%{query.lower()}%")
         parameters.append(limit)
-        sql = (
-            "SELECT * FROM logs WHERE "
-            + " AND ".join(clauses)
-            + " ORDER BY timestamp, line_no LIMIT %s"
-        )
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        sql = "SELECT * FROM logs" + where + " ORDER BY timestamp, dataset, line_no LIMIT %s"
         with self._connect() as connection:
             return [self._row_to_record(row) for row in connection.execute(sql, parameters)]
 
@@ -187,17 +187,23 @@ class OpenStackLogStore:
         return self.search(dataset=dataset, instance_id=instance_id, limit=limit)
 
     def instance_summary(self, *, dataset: str, instance_id: str) -> dict[str, object]:
+        where = "instance_id = %s"
+        parameters: tuple[str, ...] = (instance_id.lower(),)
+        if dataset != "all":
+            where = "dataset = %s AND " + where
+            parameters = (dataset, instance_id.lower())
         with self._connect() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT id, dataset, line_no, timestamp, source, level, logger,
                        request_id, instance_id, message, raw
-                FROM logs WHERE dataset = %s AND instance_id = %s
-                ORDER BY timestamp, line_no
+                FROM logs WHERE {where}
+                ORDER BY timestamp, dataset, line_no
                 """,
-                (dataset, instance_id.lower()),
+                parameters,
             ).fetchall()
         records = [self._row_to_record(row) for row in rows]
+        matched_datasets = sorted({record.dataset for record in records})
         levels = Counter(record.level for record in records)
         sources = Counter(record.logger.split(".")[0] for record in records)
         baseline = self.normal_build_duration_baseline()
@@ -216,6 +222,7 @@ class OpenStackLogStore:
             suspicious.append(build_record)
         return {
             "dataset": dataset,
+            "matched_datasets": matched_datasets,
             "instance_id": instance_id.lower(),
             "total_records": len(records),
             "level_counts": dict(levels),

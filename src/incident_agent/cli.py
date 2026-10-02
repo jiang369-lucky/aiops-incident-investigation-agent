@@ -21,14 +21,11 @@ def _parser() -> argparse.ArgumentParser:
 
     investigate = commands.add_parser("investigate", help="Investigate one VM instance")
     investigate.add_argument("instance_id")
-    investigate.add_argument(
-        "--dataset", choices=["abnormal", "normal1", "normal2"], default="abnormal"
-    )
     investigate.add_argument("--mode", choices=["heuristic", "llm"], default=None)
     investigate.add_argument(
         "--approve-ticket",
         action="store_true",
-        help="After displaying the report, persist a ticket draft locally",
+        help="After displaying the report, persist an approved draft in PostgreSQL",
     )
 
     evaluation = commands.add_parser("evaluate", help="Run the locked-label smoke evaluation")
@@ -51,7 +48,7 @@ async def _run(args: argparse.Namespace) -> int:
 
     if args.command == "investigate":
         task = (
-            f"Investigate OpenStack instance {args.instance_id}; dataset={args.dataset}. "
+            f"Investigate OpenStack instance {args.instance_id}. "
             "Produce an evidence-grounded report and do not take remediation action."
         )
         result = await application.harness(args.mode).run(task)

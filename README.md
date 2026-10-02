@@ -1,7 +1,7 @@
 # AIOps 日志故障调查与工单辅助 Agent
 
 这是一个可以本地复现的 Agent 工程：输入 OpenStack 虚拟机实例 ID，Agent 受限调用日志工具，
-重建时间线、提出候选故障假设、主动查找反证、校验日志引用，最后输出一份必须由人工确认的工单草稿。
+跨所有日志分区重建时间线、提出候选故障假设、主动查找反证、校验日志引用，最后输出一份必须由人工确认的工单草稿。
 
 项目使用公开的 Loghub OpenStack 数据。它不是自动修复系统，也不会把公开数据的“异常实例标签”
 夸大成逐行根因标签。
@@ -12,11 +12,17 @@
   重试、重复调用和工具白名单，并保存 JSONL Trace。
 - **Skills**：把日志分诊、证据核验、报告生成写成三个可复用的工作方法；离线策略和 LLM
   策略加载同一组 Skill。
-- **MCP 工具封装**：通过官方 Python MCP SDK 暴露只读日志查询、时间线、Runbook 检索和证据校验；
-  工单写入工具要求显式 `approved=true`。
+- **MCP 工具封装**：Agent 默认在一次调查中复用一个 stdio MCP 会话，先发现工具及参数 Schema，
+  再通过 MCP 调用日志查询、时间线、Runbook 检索、历史记忆和证据校验。LLM 使用模型原生
+  Function Calling 选择下一项工具，Harness 校验白名单后执行。同一 MCP 服务也能供外部客户端使用。
+  工单写入工具不在 Agent Harness 白名单内，外部调用者必须显式传入 `approved=true`。
 - **双运行模式**：`heuristic` 不需要 API Key，可稳定演示和作为基线；`llm` 支持任何兼容
-  OpenAI Chat Completions 的模型服务。
-- **可复现评测**：评测器单独读取标签；Agent 和 MCP 工具都接触不到标签，避免数据泄漏。
+  OpenAI Chat Completions 的模型服务。LLM 模式强制先检索日志和 Runbook，再生成报告。
+- **可溯源 RAG**：将 Markdown Runbook 按检查项切块，用 BM25 排序，检索片段及来源进入模型上下文；
+  报告分别列出经过校验的日志引用和 Runbook 指南引用。后者只用于建议，不作为故障发生的证据。
+- **上下文与长期记忆**：LLM 只接收有长度上限的当前摘要、重点事件、有效引用和检索片段；
+  显式批准的工单草稿以 JSONB 写入 PostgreSQL，按实例 ID 读取最近两条历史记录，且不作为当前证据。
+- **可复现评测**：评测器单独读取标签文件；调查入口只需实例 ID，不向 Agent 提供待查分区。原始引用仍含分区名，因此小规模冒烟评测并非严格盲测。
 - **可观测接口**：CLI、FastAPI 和 MCP 共用同一个工具注册模块，不复制业务逻辑。
 
 ## 一次任务如何运行
@@ -25,26 +31,34 @@
 告警/实例 ID
     │
     ▼
-Agent Policy ──选择──> Skill 工作方法
+Agent Policy（LLM 原生 Function Calling / 无 Key 规则基线）──加载──> Skill 工作方法
     │
     ▼
 Harness（步数、超时、重试、循环熔断、白名单、Trace）
     │
     ▼
-Tool Registry ──同一接口──> 本地调用 / FastAPI / MCP
+MCP Client（发现工具 Schema、每次调查复用一个 stdio 会话；可切本地模式排障）
+    │
+    ▼
+MCP Server ──> Tool Registry（工具实现也由 FastAPI 复用）
     │
     ├── PostgreSQL 日志索引（只读查询）
     ├── Runbook 检索
     ├── 引用校验
-    └── 工单草稿（必须人工批准）
+    └── PostgreSQL 已批准工单记忆
     │
     ▼
 带证据与反证的调查报告
 ```
 
 `Harness` 不是需要单独下载的神秘框架，而是本项目自己实现的 Agent 运行底座。它不负责判断业务
-结论，负责保证 Agent 在规定权限和预算内运行。`Skill` 是可加载的工作流程知识；`MCP` 是让工具
-能被其他 Agent 客户端发现和调用的协议封装。这三者的职责互不替代。
+结论，负责保证 Agent 在规定权限和预算内运行。`Skill` 是可加载的工作流程知识；`MCP` 是让本项目
+Agent 和其他客户端发现、调用工具的协议。这三者的职责互不替代。
+
+LLM 模式的 RAG 链路为：实例摘要与时间线检索 → Runbook 检查项检索 → 日志引用校验 →
+将检索片段交给模型生成报告 → 核对报告引用确实来自本次检索。Runbook 目前只有 3 份短文档，
+因此使用本地 BM25 分块检索即可；向量数据库、Embedding 和重排会增加依赖与维护成本，
+当前数据规模下没有足够收益。`heuristic` 模式保留为无 Key 的规则对照，不应与 LLM RAG 效果混称。
 
 ## 快速开始（Windows PowerShell）
 
@@ -62,7 +76,7 @@ python -m pip install -e ".[all]"
 incident-agent prepare
 
 # 不使用任何模型 API 的完整演示
-incident-agent investigate 544fd51c-4edc-4780-baae-ba1d80a0acfc --dataset abnormal
+incident-agent investigate 544fd51c-4edc-4780-baae-ba1d80a0acfc
 
 # 小规模、标签隔离的评测
 incident-agent evaluate
@@ -76,6 +90,13 @@ pytest -q
 不要将真实密码提交到仓库。`prepare` 重复运行会复用已有完整索引；仅在需要重建时使用
 `incident-agent prepare --force`。原来的 `data/processed/*.db` 文件不会被读取，数据会从
 `data/raw/` 重新导入 PostgreSQL。
+
+Agent 内部默认使用 `AGENT_TOOL_TRANSPORT=mcp`：每次调查启动一个 stdio MCP Server，初始化后
+通过 `list_tools` 取得工具定义，只将 Harness 白名单内的工具 Schema 提供给模型；模型通过原生
+Function Calling 选择工具，Harness 再通过 MCP `call_tool` 执行。一次调查复用会话，结束时关闭。
+排查 MCP 连通性问题时可临时设为 `local`，此时 Harness 直接调用同一套 Tool Registry；
+这不是默认业务链路。FastAPI 的职责不同：它接收前端或业务系统提交的调查请求，并返回调查结果，
+不是供模型发现和调用工具的接口。
 
 如果只使用 Docker，也可以在下载数据后运行：
 
@@ -97,11 +118,19 @@ $env:AGENT_MODEL_MODE = "llm"
 $env:AGENT_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 $env:AGENT_API_KEY = "你的 Key"
 $env:AGENT_MODEL = "qwen-plus"
-incident-agent investigate 544fd51c-4edc-4780-baae-ba1d80a0acfc --dataset abnormal --mode llm
+incident-agent investigate 544fd51c-4edc-4780-baae-ba1d80a0acfc --mode llm
 ```
 
 LLM 只能选择 Harness 白名单中的只读工具。模型返回格式错误、工具失败、超时或陷入重复调用时，
 Harness 会记录 Trace 并返回稳定的失败状态，而不是无限循环。
+模型报告若引用未经校验的日志、未检索到的 Runbook 片段，或取消人工复核，也会被拒绝。
+每次运行的完整工具轨迹仍保留在 JSONL Trace 中；缩短模型上下文不会删除审计记录。
+
+上下文分两层：本次调查的工具观察保留在 Harness 中，交给 LLM 前由 ContextManager 按约
+12,000 字符预算筛选实例摘要、异常/首尾事件、近两次日志搜索、已校验引用和 Runbook 片段；
+历史层只查询 PostgreSQL `approved_case_memory` 中相同实例、最近两条已批准记录。
+该表的 `report` 为 JSONB，并对 `(instance_id, approved_at DESC)` 建索引。历史仅供参考，
+当次结论仍必须由当次日志引用支持；评测标签不会进入上下文。旧的本地 JSON 草稿不再用于记忆。
 
 ## 启动 FastAPI
 
@@ -120,10 +149,13 @@ uvicorn incident_agent.api:app --reload --port 8000
 ```json
 {
   "instance_id": "544fd51c-4edc-4780-baae-ba1d80a0acfc",
-  "dataset": "abnormal",
   "mode": "heuristic"
 }
 ```
+
+调查入口会按实例 ID 搜索全部已索引分区；报告的 `dataset` 字段为 `all`，
+而每条证据仍使用原始的 `分区:行号`（例如 `abnormal:11983`）定位日志。
+如果没有匹配记录，报告会标记为 `uncertain`，不会凭空判断故障。
 
 ## 启动 MCP Server
 
@@ -131,7 +163,7 @@ uvicorn incident_agent.api:app --reload --port 8000
 incident-mcp
 ```
 
-这是 stdio MCP Server，可供支持 MCP 的 Agent 客户端启动。客户端配置示例：
+这是 Agent 内部默认使用的 stdio MCP Server，也可供其他 MCP 客户端启动。客户端配置示例：
 
 ```json
 {
@@ -149,10 +181,15 @@ incident-mcp
 - `search_logs`
 - `get_timeline`
 - `search_runbooks`
+- `get_case_memory`
 - `validate_evidence`
 - `save_ticket_draft`
 
 评测标签没有注册为工具，因此 Agent 无法在运行时偷看答案。
+
+`get_case_memory` 只按实例 ID 读取 PostgreSQL 中已批准的工单记录；普通调查不会自动写入。
+命令行的 `--approve-ticket` 或外部 MCP 调用的显式 `approved=true` 才会写入。
+当前批准标记只是操作门槛，不是企业身份认证；正式接入生产流程仍需身份校验和审批审计。
 
 ## 评测口径
 
@@ -172,7 +209,7 @@ incident-mcp
 
 ## 失败与安全边界
 
-- 查询参数限制在三个数据分区，单次最多返回 100 条日志；
+- 调查按实例 ID 跨三个已索引分区查询，单次最多返回 100 条日志；
 - Harness 限制最大 8 步、总耗时 45 秒、单工具 8 秒；
 - 同一个工具和参数重复超过阈值会熔断；
 - 工具错误进行有限指数退避重试；
@@ -199,14 +236,16 @@ src/incident_agent/
   policies.py      # 离线策略与 OpenAI-compatible LLM 策略
   tools.py         # 所有调用方式共用的工具注册模块
   logstore.py      # 日志解析、PostgreSQL 索引和受限查询
-  mcp_server.py    # MCP adapter
+  mcp_client.py    # Agent 内部复用的 stdio MCP 客户端
+  mcp_server.py    # MCP 工具服务
+  memory.py        # PostgreSQL 已批准工单记忆
   api.py           # FastAPI adapter
   evaluation.py    # 标签隔离的评测器
 skills/            # 三个可加载 Skill
 knowledge/         # Runbook 知识
 tests/             # Parser、工具、Harness、Skill 测试
 data/              # 原始数据和数据说明（数据库由 Docker Volume 保存）
-artifacts/         # Trace、工单草稿、评测结果
+artifacts/         # Trace、评测结果；已批准工单存 PostgreSQL
 ```
 
 ## 本项目真正实现的部分

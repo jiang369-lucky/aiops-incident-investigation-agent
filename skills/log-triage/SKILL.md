@@ -5,7 +5,7 @@ description: Reconstruct an incident timeline before deciding whether an instanc
 
 # Log triage procedure
 
-1. Confirm the dataset and VM instance identifier. Do not broaden the query to unrelated tenants.
+1. Confirm the VM instance identifier and search all indexed log partitions. Do not broaden the query to unrelated instances or tenants.
 2. Call `get_instance_summary` first, then `get_timeline` for the same instance.
 3. Separate observed facts from hypotheses. INFO lines can still carry lifecycle evidence.
 4. Treat isolated warnings as weak signals. Look for repetition, ordering, and cross-module agreement.

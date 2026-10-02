@@ -14,14 +14,13 @@ mcp = FastMCP("openstack-incident-tools")
 
 
 @mcp.tool()
-def get_instance_summary(dataset: str, instance_id: str) -> dict[str, Any]:
-    """Return bounded counts and suspicious signals for a VM instance."""
-    return application.tools.get_instance_summary(dataset, instance_id)
+def get_instance_summary(instance_id: str) -> dict[str, Any]:
+    """Return bounded counts and signals across all logs for a VM instance."""
+    return application.tools.get_instance_summary("all", instance_id)
 
 
 @mcp.tool()
 def search_logs(
-    dataset: str,
     instance_id: str = "",
     request_id: str = "",
     query: str = "",
@@ -30,7 +29,7 @@ def search_logs(
 ) -> dict[str, Any]:
     """Read at most 100 matching logs. This tool never exposes evaluation labels."""
     return application.tools.search_logs(
-        dataset=dataset,
+        dataset="all",
         instance_id=instance_id or None,
         request_id=request_id or None,
         query=query or None,
@@ -40,26 +39,32 @@ def search_logs(
 
 
 @mcp.tool()
-def get_timeline(dataset: str, instance_id: str, limit: int = 80) -> dict[str, Any]:
+def get_timeline(instance_id: str, limit: int = 80) -> dict[str, Any]:
     """Return chronological, citeable events for one VM instance."""
-    return application.tools.get_timeline(dataset, instance_id, limit)
+    return application.tools.get_timeline("all", instance_id, limit)
 
 
 @mcp.tool()
 def search_runbooks(query: str, limit: int = 3) -> dict[str, Any]:
-    """Find operational guidance; runbooks are guidance rather than incident evidence."""
+    """Find citeable Runbook chunks; guidance is not incident evidence."""
     return application.tools.search_runbooks(query, limit)
 
 
 @mcp.tool()
-def validate_evidence(dataset: str, instance_id: str, citations: list[str]) -> dict[str, Any]:
+def get_case_memory(instance_id: str, limit: int = 2) -> dict[str, Any]:
+    """Read recent human-approved drafts for this instance as historical context."""
+    return application.tools.get_case_memory(instance_id, limit)
+
+
+@mcp.tool()
+def validate_evidence(instance_id: str, citations: list[str]) -> dict[str, Any]:
     """Verify that citations exist and match the investigated instance."""
-    return application.tools.validate_evidence(dataset, instance_id, citations)
+    return application.tools.validate_evidence("all", instance_id, citations)
 
 
 @mcp.tool()
 def save_ticket_draft(ticket: dict[str, Any], approved: bool = False) -> dict[str, Any]:
-    """Save a local ticket draft only when a human explicitly passes approved=true."""
+    """Persist a draft in PostgreSQL only when the caller explicitly passes approved=true."""
     return application.tools.save_ticket_draft(ticket, approved)
 
 

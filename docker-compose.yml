@@ -24,6 +24,7 @@ services:
       - "127.0.0.1:8000:8000"
     environment:
       AGENT_DATABASE_URL: postgresql://incident:${POSTGRES_PASSWORD:-incident_dev_password}@postgres:5432/incident_agent
+      AGENT_TOOL_TRANSPORT: mcp
       AGENT_SKILLS_PATH: /app/skills
       AGENT_RUNBOOKS_PATH: /app/knowledge/runbooks
     volumes:

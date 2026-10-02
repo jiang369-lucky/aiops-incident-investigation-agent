@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import Callable
 from dataclasses import asdict
-from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
 from .logstore import DATASET_FILES, OpenStackLogStore
+from .memory import ApprovedCaseMemory
 from .runbooks import RunbookStore
 
 ToolFunction = Callable[..., dict[str, Any]]
@@ -20,22 +18,22 @@ class ToolError(RuntimeError):
 
 
 class ToolRegistry:
-    """Single seam shared by the agent harness, FastAPI adapter, and MCP adapter."""
+    """Shared tool implementation behind the MCP server and optional local transport."""
 
     def __init__(
         self,
         store: OpenStackLogStore,
         runbooks: RunbookStore,
-        tickets_path: Path,
     ):
         self.store = store
         self.runbooks = runbooks
-        self.tickets_path = Path(tickets_path)
+        self.memory = ApprovedCaseMemory(store.database_url)
         self._tools: dict[str, ToolFunction] = {
             "get_instance_summary": self.get_instance_summary,
             "search_logs": self.search_logs,
             "get_timeline": self.get_timeline,
             "search_runbooks": self.search_runbooks,
+            "get_case_memory": self.get_case_memory,
             "validate_evidence": self.validate_evidence,
             "save_ticket_draft": self.save_ticket_draft,
         }
@@ -47,23 +45,26 @@ class ToolRegistry:
     def call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         if name not in self._tools:
             raise ToolError(f"Unknown tool: {name}")
+        if name in {"get_instance_summary", "search_logs", "get_timeline", "validate_evidence"}:
+            if arguments.get("dataset", "all") != "all":
+                raise ToolError("Agent tools search all log partitions; omit dataset")
+            arguments = {"dataset": "all", **arguments}
         try:
             return self._tools[name](**arguments)
         except TypeError as exc:
             raise ToolError(f"Invalid arguments for {name}: {exc}") from exc
 
     def describe(self) -> list[dict[str, Any]]:
-        return [
+        definitions = [
             {
                 "name": "get_instance_summary",
-                "description": "Count levels and suspicious signals for one VM instance.",
-                "arguments": {"dataset": "abnormal|normal1|normal2", "instance_id": "uuid"},
+                "description": "Count signals for one VM instance across all log partitions.",
+                "arguments": {"instance_id": "uuid"},
             },
             {
                 "name": "search_logs",
                 "description": "Read a bounded set of matching log records.",
                 "arguments": {
-                    "dataset": "abnormal|normal1|normal2",
                     "instance_id": "optional uuid",
                     "request_id": "optional req-uuid",
                     "query": "optional text",
@@ -74,18 +75,22 @@ class ToolRegistry:
             {
                 "name": "get_timeline",
                 "description": "Return chronological events for one VM instance.",
-                "arguments": {"dataset": "dataset", "instance_id": "uuid", "limit": "1..100"},
+                "arguments": {"instance_id": "uuid", "limit": "1..100"},
             },
             {
                 "name": "search_runbooks",
-                "description": "Retrieve operating guidance. Runbooks are advice, not evidence.",
+                "description": "Retrieve ranked, citeable Runbook chunks as guidance, not incident evidence.",
                 "arguments": {"query": "text", "limit": "1..5"},
+            },
+            {
+                "name": "get_case_memory",
+                "description": "Read recent human-approved drafts for this instance as background, never evidence.",
+                "arguments": {"instance_id": "uuid", "limit": "1..3"},
             },
             {
                 "name": "validate_evidence",
                 "description": "Verify that citations exist and refer to the investigated instance.",
                 "arguments": {
-                    "dataset": "dataset",
                     "instance_id": "uuid",
                     "citations": "list like abnormal:11960",
                 },
@@ -96,10 +101,68 @@ class ToolRegistry:
                 "arguments": {"ticket": "object", "approved": "boolean"},
             },
         ]
+        schemas: dict[str, dict[str, Any]] = {
+            "get_instance_summary": {
+                "type": "object",
+                "properties": {"instance_id": {"type": "string"}},
+                "required": ["instance_id"],
+            },
+            "search_logs": {
+                "type": "object",
+                "properties": {
+                    "instance_id": {"type": "string"},
+                    "request_id": {"type": "string"},
+                    "query": {"type": "string"},
+                    "levels": {"type": "array", "items": {"type": "string"}},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                },
+            },
+            "get_timeline": {
+                "type": "object",
+                "properties": {
+                    "instance_id": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                },
+                "required": ["instance_id"],
+            },
+            "search_runbooks": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 5},
+                },
+                "required": ["query"],
+            },
+            "get_case_memory": {
+                "type": "object",
+                "properties": {
+                    "instance_id": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 3},
+                },
+                "required": ["instance_id"],
+            },
+            "validate_evidence": {
+                "type": "object",
+                "properties": {
+                    "instance_id": {"type": "string"},
+                    "citations": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["instance_id", "citations"],
+            },
+            "save_ticket_draft": {
+                "type": "object",
+                "properties": {
+                    "ticket": {"type": "object"},
+                    "approved": {"type": "boolean"},
+                },
+                "required": ["ticket"],
+            },
+        }
+        return [{**item, "input_schema": schemas[item["name"]]} for item in definitions]
 
     @staticmethod
     def _dataset(value: str) -> str:
-        if value not in DATASET_FILES:
+        if value != "all" and value not in DATASET_FILES:
             raise ToolError(f"Invalid dataset: {value}")
         return value
 
@@ -154,6 +217,15 @@ class ToolRegistry:
         matches = self.runbooks.search(query, limit=min(max(int(limit), 1), 5))
         return {"count": len(matches), "matches": matches}
 
+    def get_case_memory(self, instance_id: str, limit: int = 2) -> dict[str, Any]:
+        instance_id = self._instance(instance_id)
+        cases = self.memory.recent(instance_id, limit)
+        return {
+            "count": len(cases),
+            "cases": cases,
+            "warning": "Past approved drafts are background, not evidence about the current run.",
+        }
+
     def validate_evidence(
         self, dataset: str, instance_id: str, citations: list[str]
     ) -> dict[str, Any]:
@@ -166,7 +238,7 @@ class ToolRegistry:
             record = self.store.record_by_citation(citation)
             valid = bool(
                 record
-                and record.dataset == dataset
+                and (dataset == "all" or record.dataset == dataset)
                 and (record.instance_id == instance_id or instance_id in record.raw.lower())
             )
             details.append(
@@ -190,11 +262,8 @@ class ToolRegistry:
                 "message": "Human approval is required before writing a ticket draft.",
             }
         instance_id = self._instance(str(ticket.get("instance_id", "")))
-        self.tickets_path.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        output = self.tickets_path / f"{timestamp}-{instance_id}.json"
-        output.write_text(json.dumps(ticket, ensure_ascii=False, indent=2), encoding="utf-8")
-        return {"saved": True, "path": str(output), "requires_approval": False}
+        saved = self.memory.save_approved(instance_id, ticket)
+        return {"saved": True, **saved, "requires_approval": False}
 
     @staticmethod
     def _record(record: Any) -> dict[str, Any]:

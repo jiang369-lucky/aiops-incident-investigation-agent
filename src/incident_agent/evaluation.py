@@ -46,8 +46,8 @@ async def evaluate(
     rows: list[dict[str, Any]] = []
     for case in cases:
         task = (
-            f"Investigate OpenStack instance {case.instance_id}; "
-            f"dataset={case.dataset}. Produce an evidence-grounded report."
+            f"Investigate OpenStack instance {case.instance_id}. "
+            "Produce an evidence-grounded report."
         )
         result = await application.harness(mode).run(task)
         predicted = bool(result.report and result.report.verdict == "anomalous")
@@ -55,7 +55,7 @@ async def evaluate(
         valid = 0
         if result.report and result.report.evidence:
             check = application.tools.validate_evidence(
-                dataset=case.dataset,
+                dataset="all",
                 instance_id=case.instance_id,
                 citations=result.report.evidence,
             )

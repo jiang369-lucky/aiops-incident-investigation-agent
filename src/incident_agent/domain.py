@@ -60,6 +60,7 @@ class IncidentReport:
     evidence: list[str]
     counterevidence: list[str]
     recommended_actions: list[str]
+    runbook_sources: list[str] = field(default_factory=list)
     requires_human_review: bool = True
     limitations: list[str] = field(default_factory=list)
     skills_used: list[str] = field(default_factory=list)
